@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+*.log
+
+# Editor / tooling state
+.vscode/
+.idea/
+.claude/
+
+# Per-user runtime config (saved API keys)
+.agent-demo.json

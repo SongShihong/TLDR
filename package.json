@@ -1,0 +1,18 @@
+{
+  "name": "agent-demo",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun index.ts",
+    "start:node": "npx tsx index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/generative-ai": "^0.21.0",
+    "openai": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.0.0"
+  }
+}
