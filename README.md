@@ -22,7 +22,10 @@ inspired by Claude Code.
 
 ## Features
 
-- **Three providers, one interface** — Anthropic, OpenAI, Gemini
+- **34 providers, one interface** — Anthropic, OpenAI, Gemini natively, plus
+  31 OpenAI-compatible endpoints (Groq, DeepSeek, xAI, OpenRouter, Together,
+  Mistral, Moonshot, Qwen, Z.AI, MiniMax, StepFun, Fireworks, NVIDIA, Ollama,
+  LM Studio, vLLM, …). Full list below.
 - **Prompt caching on Anthropic** — system prompt is marked
   `cache_control: ephemeral` on every request
 - **Real tool use** — built-in `exec`, `read_file`, `write_file`
@@ -87,6 +90,77 @@ Setting these lets the setup skip the matching question:
 
 A full reference and "how to add your own slash command" is in
 [SLASH_COMMANDS.md](SLASH_COMMANDS.md).
+
+---
+
+## Supported providers
+
+Every entry below is one row in [`presets.ts`](presets.ts). Picking it
+from the startup menu auto-fills the base URL and the env var that holds
+the API key.
+
+### Native SDKs
+
+| Preset      | Backend           | API-key env          |
+| ----------- | ----------------- | -------------------- |
+| `anthropic` | Claude            | `ANTHROPIC_API_KEY`  |
+| `openai`    | OpenAI            | `OPENAI_API_KEY`     |
+| `gemini`    | Google Gemini     | `GEMINI_API_KEY`     |
+
+### OpenAI-compatible hosted
+
+| Preset       | Backend                 | API-key env            |
+| ------------ | ----------------------- | ---------------------- |
+| `groq`       | Groq                    | `GROQ_API_KEY`         |
+| `deepseek`   | DeepSeek                | `DEEPSEEK_API_KEY`     |
+| `mistral`    | Mistral                 | `MISTRAL_API_KEY`      |
+| `openrouter` | OpenRouter              | `OPENROUTER_API_KEY`   |
+| `xai`        | xAI (Grok)              | `XAI_API_KEY`          |
+| `together`   | Together AI             | `TOGETHER_API_KEY`     |
+| `perplexity` | Perplexity              | `PERPLEXITY_API_KEY`   |
+| `moonshot`   | Moonshot (Kimi)         | `MOONSHOT_API_KEY`     |
+| `kimi-coding`| Kimi Coding             | `KIMI_API_KEY`         |
+| `qwen`       | Qwen / Alibaba DashScope| `DASHSCOPE_API_KEY`    |
+| `zai`        | Z.AI (GLM)              | `ZAI_API_KEY`          |
+| `minimax`    | MiniMax                 | `MINIMAX_API_KEY`      |
+| `stepfun`    | StepFun                 | `STEPFUN_API_KEY`      |
+| `fireworks`  | Fireworks AI            | `FIREWORKS_API_KEY`    |
+| `nvidia`     | NVIDIA NIM              | `NVIDIA_API_KEY`       |
+| `volcengine` | Volcengine (Doubao CN)  | `VOLCANO_ENGINE_API_KEY` |
+| `byteplus`   | BytePlus (Doubao Intl)  | `BYTEPLUS_API_KEY`     |
+| `qianfan`    | Baidu Qianfan (ERNIE)   | `QIANFAN_API_KEY`      |
+| `huggingface`| Hugging Face Inference  | `HF_TOKEN`             |
+| `venice`     | Venice AI               | `VENICE_API_KEY`       |
+| `xiaomi`     | Xiaomi Mimo             | `XIAOMI_API_KEY`       |
+| `arcee`      | Arcee AI                | `ARCEEAI_API_KEY`      |
+| `kilocode`   | Kilo Code gateway       | `KILOCODE_API_KEY`     |
+
+### Gateways / proxies
+
+| Preset                  | Backend                   | API-key env                       |
+| ----------------------- | ------------------------- | --------------------------------- |
+| `litellm`               | LiteLLM (self-hosted)     | `LITELLM_API_KEY`                 |
+| `vercel-ai-gateway`     | Vercel AI Gateway         | `AI_GATEWAY_API_KEY`              |
+| `cloudflare-ai-gateway` | Cloudflare AI Gateway     | `CLOUDFLARE_AI_GATEWAY_API_KEY`   |
+
+### Local / self-hosted
+
+| Preset     | Backend              | API-key env       |
+| ---------- | -------------------- | ----------------- |
+| `ollama`   | Ollama               | `OLLAMA_API_KEY`  |
+| `lmstudio` | LM Studio            | `LM_API_TOKEN`    |
+| `vllm`     | vLLM                 | `VLLM_API_KEY`    |
+| `sglang`   | SGLang               | `SGLANG_API_KEY`  |
+
+### Escape hatch
+
+| Preset   | Backend                               |
+| -------- | ------------------------------------- |
+| `custom` | Any OpenAI-compatible URL you supply  |
+
+Not yet supported (bespoke SDKs / auth flows): Amazon Bedrock,
+Anthropic-on-Vertex, GitHub Copilot. Add them as new `flavor`s in
+`presets.ts` and a matching provider class in `providers.ts`.
 
 ---
 

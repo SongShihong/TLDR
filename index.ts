@@ -7,6 +7,8 @@ import type { LLMProvider } from "./providers.ts";
 import { runAgent, createSessionUsage } from "./agent.ts";
 import type { NormalizedMessage, SessionUsage } from "./agent.ts";
 import { c, icon, banner } from "./ui.ts";
+import { PRESETS, findPreset } from "./presets.ts";
+import type { ProviderPreset } from "./presets.ts";
 
 // ---------------------------------------------------------------------------
 // Config persistence
@@ -56,82 +58,101 @@ function ask(question: string, envFallback?: string): Promise<string> {
   return new Promise((resolve) => rl.question(question, resolve));
 }
 
-/** Fetch available models and let the user pick one from a numbered list. */
+/** Fetch available models for the given preset and let the user pick one. */
 async function pickModel(
-  providerName: string,
+  preset: ProviderPreset,
   apiKey: string,
   baseURL?: string
 ): Promise<string> {
-  const DEFAULTS: Record<string, string> = {
-    anthropic: "claude-sonnet-4-6",
-    openai: "gpt-4o",
-    gemini: "gemini-2.0-flash",
-    google: "gemini-2.0-flash",
-  };
-  const defaultModel = DEFAULTS[providerName.toLowerCase()] ?? "";
+  const defaultModel = preset.defaultModel;
 
-  process.stdout.write("Fetching available models... ");
+  process.stdout.write(c.dim("Fetching available models... "));
   let models: string[] = [];
   try {
-    models = await listModels(providerName, apiKey, baseURL);
-    process.stdout.write(`${models.length} found.\n\n`);
+    models = await listModels(preset, apiKey, baseURL);
+    process.stdout.write(c.dim(`${models.length} found.\n\n`));
   } catch (err) {
-    process.stdout.write(`(could not fetch: ${err instanceof Error ? err.message : err})\n`);
+    process.stdout.write(
+      c.dim(`(could not fetch: ${err instanceof Error ? err.message : err})\n`)
+    );
   }
 
   if (models.length === 0) {
-    // Fall back to free-text input
-    const input = await ask(`Model [default: ${defaultModel}]: `);
+    const input = await ask(`Model [default: ${c.cyan(defaultModel)}]: `);
     return input.trim() || defaultModel;
   }
 
-  // Print numbered list
-  console.log("Available models:");
-  models.forEach((m, i) => console.log(`  ${i + 1}. ${m}`));
+  console.log(c.dim("Available models:"));
+  models.forEach((m, i) => console.log(`  ${c.dim(String(i + 1).padStart(3))}. ${m}`));
   console.log();
 
   const input = await ask(
-    `Pick a number or type a model name [default: ${defaultModel}]: `
+    `Pick a number or type a model name [default: ${c.cyan(defaultModel)}]: `
   );
   const trimmed = input.trim();
-
   if (!trimmed) return defaultModel;
 
-  // If the user entered a number, resolve to the model at that index
   const idx = parseInt(trimmed, 10);
   if (!isNaN(idx) && idx >= 1 && idx <= models.length) {
     return models[idx - 1];
   }
-
-  // Otherwise treat it as a literal model name
   return trimmed;
 }
 
-async function collectConfig(): Promise<SavedConfig> {
-  const providerName = await ask(
-    "Provider [anthropic/openai/gemini] (or set PROVIDER env): ",
-    "PROVIDER"
-  );
-
-  const normalized = providerName.trim().toLowerCase();
-  const KEY_ENV_VARS: Record<string, string> = {
-    anthropic: "ANTHROPIC_API_KEY",
-    openai: "OPENAI_API_KEY",
-    gemini: process.env["GOOGLE_API_KEY"] ? "GOOGLE_API_KEY" : "GEMINI_API_KEY",
-    google: process.env["GOOGLE_API_KEY"] ? "GOOGLE_API_KEY" : "GEMINI_API_KEY",
-  };
-  const keyEnvVar = KEY_ENV_VARS[normalized];
-
-  const apiKey = await ask("API key: ", keyEnvVar);
-
-  let baseURL: string | undefined;
-  if (normalized === "openai") {
-    const baseURLInput = await ask("Base URL (leave blank for OpenAI default): ");
-    baseURL = baseURLInput.trim() || undefined;
+/** Show the numbered provider menu and return the chosen preset. */
+async function pickPreset(): Promise<ProviderPreset> {
+  // Env shortcut: PROVIDER=groq skips the menu entirely.
+  const envProvider = process.env["PROVIDER"];
+  if (envProvider) {
+    const match = findPreset(envProvider);
+    if (match) {
+      console.log(c.dim(`Provider: ${match.id} (from env PROVIDER)`));
+      return match;
+    }
+    console.log(c.yellow(`Env PROVIDER="${envProvider}" did not match any preset.`));
   }
 
-  const model = await pickModel(providerName.trim(), apiKey.trim(), baseURL);
-  return { provider: providerName.trim(), apiKey: apiKey.trim(), model, baseURL };
+  console.log(c.dim("Available providers:"));
+  const labelWidth = Math.max(...PRESETS.map((p) => p.id.length));
+  PRESETS.forEach((p, i) => {
+    console.log(
+      `  ${c.dim(String(i + 1).padStart(3))}. ${c.cyan(p.id.padEnd(labelWidth))}  ${c.dim(p.label)}`
+    );
+  });
+  console.log();
+
+  while (true) {
+    const input = (await ask("Pick a number or type a provider id: ")).trim();
+    if (!input) continue;
+
+    const idx = parseInt(input, 10);
+    if (!isNaN(idx) && idx >= 1 && idx <= PRESETS.length) return PRESETS[idx - 1];
+
+    const match = findPreset(input);
+    if (match) return match;
+
+    console.log(c.yellow(`No provider matching "${input}". Try again.`));
+  }
+}
+
+async function collectConfig(): Promise<SavedConfig> {
+  const preset = await pickPreset();
+
+  const apiKey = (await ask(`API key: `, preset.apiKeyEnv)).trim();
+
+  let baseURL: string | undefined;
+  if (preset.requiresCustomBaseURL) {
+    const input = (await ask("Base URL (required for this preset): ")).trim();
+    baseURL = input || undefined;
+    if (!baseURL) throw new Error(`Preset "${preset.id}" requires a base URL.`);
+  } else if (preset.flavor === "openai") {
+    // Stock OpenAI: allow an override for proxies (Azure, etc.)
+    const input = (await ask("Base URL (blank = OpenAI default): ")).trim();
+    baseURL = input || undefined;
+  }
+
+  const model = await pickModel(preset, apiKey, baseURL);
+  return { provider: preset.id, apiKey, model, baseURL };
 }
 
 async function setupWithConfig(): Promise<{ provider: LLMProvider; config: SavedConfig }> {
@@ -167,7 +188,14 @@ async function setupWithConfig(): Promise<{ provider: LLMProvider; config: Saved
     console.log(c.dim(`Config saved to ${CONFIG_PATH}`));
   }
 
-  const provider = createProvider(cfg.provider, cfg.apiKey, cfg.model, cfg.baseURL);
+  const preset = findPreset(cfg.provider);
+  if (!preset) {
+    throw new Error(
+      `Saved config references unknown provider "${cfg.provider}". ` +
+        `Delete ${CONFIG_PATH} or type "reset" at the next prompt.`
+    );
+  }
+  const provider = createProvider(preset, cfg.apiKey, cfg.model, cfg.baseURL);
   console.log();
   console.log(
     `${c.green(icon.check)} ${c.bold("Ready.")} ${c.dim("Using")} ${c.cyan(cfg.provider)} ${c.dim("/")} ${c.cyan(cfg.model)}`

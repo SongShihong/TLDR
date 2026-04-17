@@ -418,36 +418,25 @@ export class GeminiProvider implements LLMProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Model listing (one function per provider, called before the provider is created)
+// Model listing — preset-aware
 // ---------------------------------------------------------------------------
 
-/** Returns a sorted list of model IDs available for the given provider+key. */
+import type { ProviderPreset } from "./presets.ts";
+
+/** Returns a sorted list of model IDs available for the given preset + key. */
 export async function listModels(
-  providerName: string,
+  preset: ProviderPreset,
   apiKey: string,
   baseURL?: string
 ): Promise<string[]> {
-  const name = providerName.toLowerCase();
-
-  if (name === "anthropic") {
+  if (preset.flavor === "anthropic") {
     const client = new Anthropic({ apiKey });
     const page = await client.models.list({ limit: 100 });
     return page.data.map((m) => m.id);
   }
 
-  if (name === "openai" || baseURL) {
-    const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
-    const page = await client.models.list();
-    // Keep only text generation models; skip embeddings, tts, whisper, dall-e, etc.
-    const CHAT_PREFIXES = ["gpt-", "o1", "o3", "o4", "chatgpt-"];
-    const filtered = page.data
-      .filter((m) => CHAT_PREFIXES.some((p) => m.id.startsWith(p)))
-      .sort((a, b) => b.created - a.created);
-    return filtered.map((m) => m.id);
-  }
-
-  if (name === "gemini" || name === "google") {
-    // The @google/generative-ai SDK does not expose listModels, use the REST API directly
+  if (preset.flavor === "gemini") {
+    // The @google/generative-ai SDK does not expose listModels, use REST directly
     const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=100`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Gemini models API returned ${res.status}`);
@@ -460,7 +449,21 @@ export async function listModels(
       .sort();
   }
 
-  return []; // unknown provider — caller will fall back to free-text input
+  // openai / openai-compatible: use GET /models via the OpenAI SDK
+  const effectiveBase = baseURL ?? preset.baseURL;
+  const client = new OpenAI({ apiKey, ...(effectiveBase ? { baseURL: effectiveBase } : {}) });
+  const page = await client.models.list();
+
+  // For the canonical OpenAI endpoint, filter noise (embeddings, tts, whisper…).
+  // For everyone else, return whatever the endpoint advertises.
+  if (preset.id === "openai") {
+    const CHAT_PREFIXES = ["gpt-", "o1", "o3", "o4", "chatgpt-"];
+    return page.data
+      .filter((m) => CHAT_PREFIXES.some((p) => m.id.startsWith(p)))
+      .sort((a, b) => b.created - a.created)
+      .map((m) => m.id);
+  }
+  return page.data.map((m) => m.id).sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -468,27 +471,19 @@ export async function listModels(
 // ---------------------------------------------------------------------------
 
 export function createProvider(
-  providerName: string,
+  preset: ProviderPreset,
   apiKey: string,
   model: string,
-  baseURL?: string
+  baseURLOverride?: string
 ): LLMProvider {
-  switch (providerName.toLowerCase()) {
-    case "anthropic":
-      return new AnthropicProvider(apiKey, model);
-    case "openai":
-      return new OpenAIProvider(apiKey, model, baseURL);
-    case "gemini":
-    case "google":
-      return new GeminiProvider(apiKey, model);
-    default:
-      // Treat as OpenAI-compatible if a baseURL is supplied
-      if (baseURL) {
-        return new OpenAIProvider(apiKey, model, baseURL);
-      }
-      throw new Error(
-        `Unknown provider "${providerName}". Supported: anthropic, openai, gemini. ` +
-          `For other OpenAI-compatible APIs, enter "openai" and supply a base URL.`
-      );
+  if (preset.flavor === "anthropic") return new AnthropicProvider(apiKey, model);
+  if (preset.flavor === "gemini") return new GeminiProvider(apiKey, model);
+
+  const url = baseURLOverride ?? preset.baseURL;
+  if (preset.flavor === "openai-compatible" && !url) {
+    throw new Error(
+      `Preset "${preset.id}" is OpenAI-compatible but no base URL was provided.`
+    );
   }
+  return new OpenAIProvider(apiKey, model, url);
 }
