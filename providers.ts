@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { GoogleGenerativeAI, type Content } from "@google/generative-ai";
 import type { APIToolDef } from "./tools.ts";
+import { c, icon, formatJson } from "./ui.ts";
 
 // ---------------------------------------------------------------------------
 // Normalized types (provider-agnostic)
@@ -62,8 +63,10 @@ export function isVerbose(): boolean {
 }
 function logVerbose(label: string, payload: unknown): void {
   if (!verbose) return;
-  console.log(`\n--- ${label} ---`);
-  console.log(JSON.stringify(payload, null, 2));
+  console.log();
+  console.log(`${c.orange(icon.dot)} ${c.bold(label)}`);
+  console.log(formatJson(payload));
+  console.log();
 }
 
 // ---------------------------------------------------------------------------

@@ -23,7 +23,8 @@ All styling lives in `ui.ts` (no dependencies — raw ANSI escapes).
 | `/exit`     | Quit the program. `/quit` is an alias. Bare `exit` also works. |
 | `/usage`    | Show cumulative token usage for the current session.        |
 | `/model`    | Show the active provider, model, and base URL (if any).     |
-| `/history`  | Show how many messages are stored in conversation history.  |
+| `/history`  | List stored messages, numbered (use the number with `/quote`). |
+| `/quote`    | Quote a past message: `/quote <num> <your message>`. The referenced message is unfolded into the JSON sent to the model as a `> ...` block prefixed to your new message. |
 | `/clear`    | Wipe the conversation history (context reset, config kept). |
 | `/verbose`  | Toggle raw request/response JSON logging. `/verbose on` or `/verbose off` forces a state; no arg flips it. Default: off (plain text only). |
 
@@ -61,6 +62,35 @@ Conversation history cleared.
 you> /exit
 Bye!
 ```
+
+### Quoting a past message
+
+The assistant's reply is annotated with its message number (`[#N]`). Use
+`/history` to see numbers for both sides of the conversation, then
+`/quote <num> <your message>` to reply with the referenced message
+unfolded into the JSON sent to the model.
+
+```
+you> What's the capital of France?
+
+● [#2] Paris.
+
+you> /history
+
+  #1 you        What's the capital of France?
+  #2 assistant  Paris.
+
+you> /quote 2 Tell me three facts about it.
+
+  ✓ Quoting #2 (assistant): Paris.
+
+# The model receives the user message:
+#   [Quoting message #2 (assistant):]
+#   > Paris.
+#
+#   Tell me three facts about it.
+```
+
 
 ## How it works
 

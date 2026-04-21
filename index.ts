@@ -4,9 +4,15 @@ import * as os from "os";
 import * as path from "path";
 import { createProvider, listModels, setVerbose, isVerbose } from "./providers.ts";
 import type { LLMProvider } from "./providers.ts";
-import { runAgent, createSessionUsage } from "./agent.ts";
-import type { NormalizedMessage, SessionUsage } from "./agent.ts";
-import { c, icon, banner } from "./ui.ts";
+import {
+  runAgent,
+  createSessionUsage,
+  printChatMessage,
+  chatPreview,
+  chatBody,
+} from "./agent.ts";
+import type { ChatMessage, SessionUsage } from "./agent.ts";
+import { c, icon, banner, formatFileDiff } from "./ui.ts";
 import { PRESETS, findPreset } from "./presets.ts";
 import type { ProviderPreset } from "./presets.ts";
 
@@ -208,21 +214,127 @@ async function setupWithConfig(): Promise<{ provider: LLMProvider; config: Saved
 // ---------------------------------------------------------------------------
 
 type SlashContext = {
-  history: NormalizedMessage[];
+  chat: ChatMessage[];
   usage: SessionUsage;
   config: SavedConfig;
+  /** Tool-call rule keys the user said "always allow" for this session. */
+  permissions: Set<string>;
   quit: () => void;
 };
+
+// ---------------------------------------------------------------------------
+// Tool permission prompts (interactive y / a / n confirmation per tool call)
+// ---------------------------------------------------------------------------
+
+/** Bucket a tool call into a "type" for the always-allow rule.
+ *  - exec → first command word (so `exec ls` covers `ls -la`, `ls /tmp`, …)
+ *  - everything else → just the tool name */
+function ruleKey(name: string, input: Record<string, unknown>): string {
+  if (name === "exec") {
+    const first = String(input.command ?? "").trim().split(/\s+/)[0] ?? "";
+    return `exec:${first}`;
+  }
+  return `tool:${name}`;
+}
+
+function ruleDescription(name: string, input: Record<string, unknown>): string {
+  if (name === "exec") {
+    const first = String(input.command ?? "").trim().split(/\s+/)[0] ?? "";
+    return `exec ${first} …`;
+  }
+  return name;
+}
+
+function makeAskPermission(
+  permissions: Set<string>
+): (name: string, input: Record<string, unknown>) => Promise<"allow" | "deny"> {
+  return async (name, input) => {
+    const key = ruleKey(name, input);
+    if (permissions.has(key)) return "allow";
+
+    const desc = ruleDescription(name, input);
+    console.log();
+    console.log(`  ${c.yellow(icon.warn)} ${c.bold("Permission requested")}`);
+    console.log(`    ${c.dim("tool: ")} ${c.cyan(name)}`);
+
+    if (name === "write_file") {
+      // Show a diff of the proposed change against the file on disk
+      // (or "new file" if it doesn't exist yet) instead of a raw JSON dump.
+      const filePath = String(input.path ?? "");
+      const newContent = String(input.content ?? "");
+      let oldContent: string | null = null;
+      try {
+        oldContent = fs.readFileSync(filePath, "utf8");
+      } catch {
+        oldContent = null;
+      }
+      console.log(formatFileDiff(filePath, oldContent, newContent));
+    } else {
+      console.log(`    ${c.dim("input:")} ${c.dim(JSON.stringify(input))}`);
+    }
+
+    console.log(
+      `  ${c.dim("[")}${c.green("y")}${c.dim("] yes once   [")}${c.green("a")}${c.dim(`] always for \`${desc}\`   [`)}${c.red("n")}${c.dim("] no")}`
+    );
+
+    while (true) {
+      const ans = (
+        await new Promise<string>((resolve) =>
+          rl.question(`  ${c.cyan(icon.arrow)} `, resolve)
+        )
+      )
+        .trim()
+        .toLowerCase();
+      if (ans === "" || ans === "y" || ans === "yes") return "allow";
+      if (ans === "a" || ans === "always") {
+        permissions.add(key);
+        console.log(
+          c.dim(`  ${icon.check} Will not ask again for \`${desc}\` this session.`)
+        );
+        return "allow";
+      }
+      if (ans === "n" || ans === "no") return "deny";
+      console.log(c.yellow(`  Please answer y, a, or n.`));
+    }
+  };
+}
+
+function senderTag(m: ChatMessage): string {
+  if (m.sender === "user") return c.cyan("you      ");
+  if (m.sender === "model") {
+    return c.orange(m.kind === "text" ? "model    " : "model →  ");
+  }
+  return c.lavender(m.kind === "system" ? "agent  ⚙ " : "agent  ↩ ");
+}
+
+function quoteRoleDescription(m: ChatMessage): string {
+  if (m.sender === "user") return "you";
+  if (m.sender === "model") {
+    return m.kind === "text" ? "model" : "model → agent tool call";
+  }
+  return m.kind === "system"
+    ? "agent → model system instruction"
+    : "agent → model tool result";
+}
+
+function seedChat(chat: ChatMessage[]): void {
+  const sys: ChatMessage = { sender: "agent", kind: "system", text: SYSTEM_PROMPT };
+  chat.push(sys);
+  printChatMessage(sys, chat.length);
+}
 
 type SlashCommand = {
   name: string;
   description: string;
-  run(ctx: SlashContext, args: string[]): void;
+  /** Return a string to forward it to the agent as synthesized user input
+   *  (used by /quote); return nothing for commands that only print locally. */
+  run(ctx: SlashContext, args: string[]): void | string;
 };
 
 function formatNumber(n: number): string {
   return n.toLocaleString("en-US");
 }
+
 
 const SLASH_COMMANDS: SlashCommand[] = [
   {
@@ -269,10 +381,11 @@ const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     name: "clear",
-    description: "Clear the conversation history (context reset)",
+    description: "Clear the chat log (context reset; re-seeds system prompt)",
     run(ctx) {
-      ctx.history.length = 0;
-      console.log(c.dim(`${icon.check} Conversation history cleared.\n`));
+      ctx.chat.length = 0;
+      console.log(c.dim(`${icon.check} Chat log cleared.\n`));
+      seedChat(ctx.chat);
     },
   },
   {
@@ -289,11 +402,79 @@ const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     name: "history",
-    description: "Show how many turns are stored in the conversation history",
+    description: "List every message with numbers (use #N with /quote)",
     run(ctx) {
+      if (ctx.chat.length === 0) {
+        console.log(c.dim("  (no messages yet)\n"));
+        return;
+      }
+      console.log();
+      const width = String(ctx.chat.length).length;
+      for (let i = 0; i < ctx.chat.length; i++) {
+        const m = ctx.chat[i];
+        const num = c.dim(`#${String(i + 1).padStart(width)}`);
+        console.log(`  ${num} ${senderTag(m)}  ${c.dim(chatPreview(m))}`);
+      }
+      console.log();
+    },
+  },
+  {
+    name: "quote",
+    description: "Quote any past message: /quote <num> <your message>",
+    run(ctx, args) {
+      if (args.length < 1) {
+        console.log(c.yellow("Usage: /quote <num> <your message>\n"));
+        return;
+      }
+      const idx = parseInt(args[0], 10);
+      if (isNaN(idx) || idx < 1 || idx > ctx.chat.length) {
+        console.log(
+          c.yellow(
+            `Message #${args[0]} not found. Chat has ${ctx.chat.length} messages — try /history.\n`
+          )
+        );
+        return;
+      }
+      const rest = args.slice(1).join(" ").trim();
+      if (!rest) {
+        console.log(c.yellow("Usage: /quote <num> <your message>\n"));
+        return;
+      }
+      const target = ctx.chat[idx - 1];
+      const role = quoteRoleDescription(target);
+      const quoted = chatBody(target)
+        .split("\n")
+        .map((line) => `> ${line}`)
+        .join("\n");
+      const forwarded = `[Quoting message #${idx} (${role}):]\n${quoted}\n\n${rest}`;
       console.log(
-        `  ${c.dim("History has")} ${c.cyan(String(ctx.history.length))} ${c.dim("messages.")}\n`
+        `  ${c.dim(`${icon.check} Quoting #${idx} (${role}): ${chatPreview(target, 60)}`)}\n`
       );
+      return forwarded;
+    },
+  },
+  {
+    name: "permissions",
+    description: "View or clear remembered tool-call permissions (use: /permissions [clear])",
+    run(ctx, args) {
+      if (args[0] === "clear") {
+        const n = ctx.permissions.size;
+        ctx.permissions.clear();
+        console.log(c.dim(`  ${icon.check} Cleared ${n} remembered permission(s).\n`));
+        return;
+      }
+      if (ctx.permissions.size === 0) {
+        console.log(
+          c.dim("  No remembered permissions — every tool call will be confirmed.\n")
+        );
+        return;
+      }
+      console.log();
+      console.log(`  ${c.bold("Remembered permissions")}`);
+      for (const r of ctx.permissions) {
+        console.log(`    ${c.green(icon.check)} ${c.cyan(r)}`);
+      }
+      console.log(c.dim(`  Run ${c.cyan("/permissions clear")} to remove all.\n`));
     },
   },
   {
@@ -325,17 +506,22 @@ const SLASH_COMMANDS: SlashCommand[] = [
   },
 ];
 
-/** Returns true if the input was handled as a slash command. */
-function handleSlashCommand(input: string, ctx: SlashContext): boolean {
-  if (!input.startsWith("/")) return false;
+type SlashResult =
+  | { handled: false }
+  | { handled: true; forward?: string };
+
+function handleSlashCommand(input: string, ctx: SlashContext): SlashResult {
+  if (!input.startsWith("/")) return { handled: false };
   const [name, ...args] = input.slice(1).trim().split(/\s+/);
   const cmd = SLASH_COMMANDS.find((c) => c.name === name);
   if (!cmd) {
     console.log(`Unknown command: /${name}. Type /help for a list.\n`);
-    return true;
+    return { handled: true };
   }
-  cmd.run(ctx, args);
-  return true;
+  const result = cmd.run(ctx, args);
+  return typeof result === "string"
+    ? { handled: true, forward: result }
+    : { handled: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -355,8 +541,10 @@ async function main() {
     process.exit(1);
   }
 
-  const history: NormalizedMessage[] = [];
+  const chat: ChatMessage[] = [];
   const usage = createSessionUsage();
+  const permissions = new Set<string>();
+  const askPermission = makeAskPermission(permissions);
   let shouldQuit = false;
 
   console.log(
@@ -365,10 +553,15 @@ async function main() {
     )
   );
 
+  // Seed the chat with the agent's standing system instruction so it
+  // shows up as message #1 and can be /quote'd like any other message.
+  seedChat(chat);
+
   const ctx: SlashContext = {
-    history,
+    chat,
     usage,
     config,
+    permissions,
     quit: () => {
       shouldQuit = true;
       rl.close();
@@ -379,34 +572,39 @@ async function main() {
 
   function prompt() {
     rl.question(userPrompt, async (input) => {
-      const trimmed = input.trim();
+      let userInput = input.trim();
 
-      if (!trimmed) {
+      if (!userInput) {
         prompt();
         return;
       }
 
       // Back-compat: bare "exit" still quits
-      if (trimmed === "exit") {
+      if (userInput === "exit") {
         console.log(c.orange(`\n${icon.spark} Bye!\n`));
         rl.close();
         return;
       }
 
-      if (handleSlashCommand(trimmed, ctx)) {
+      const slashResult = handleSlashCommand(userInput, ctx);
+      if (slashResult.handled) {
         if (shouldQuit) return;
-        prompt();
-        return;
+        if (!slashResult.forward) {
+          prompt();
+          return;
+        }
+        // Slash command synthesized a user message — forward it to the agent.
+        userInput = slashResult.forward;
       }
 
+      // Push and stamp the user message; runAgent then appends + stamps
+      // every model and agent message it produces this turn.
+      const userMsg: ChatMessage = { sender: "user", kind: "text", text: userInput };
+      chat.push(userMsg);
+      printChatMessage(userMsg, chat.length);
+
       try {
-        const reply = await runAgent(trimmed, history, provider, SYSTEM_PROMPT, usage);
-
-        // Persist both sides for multi-turn context
-        history.push({ role: "user", content: trimmed });
-        history.push({ role: "assistant", content: reply });
-
-        console.log(`\n${c.orange(icon.dot)} ${reply}\n`);
+        await runAgent(chat, provider, askPermission, usage);
       } catch (err) {
         console.error(
           `\n${c.red(icon.cross)} ${c.red("Error:")} ${err instanceof Error ? err.message : String(err)}\n`
